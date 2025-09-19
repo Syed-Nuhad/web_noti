@@ -1,0 +1,459 @@
+{% extends "webnotify/base.html" %}
+{% load static %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-12">
+    <ul class="nav nav-tabs mb-3" id="dashTabs" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="tab-notifs" data-bs-toggle="tab" data-bs-target="#panel-notifs" type="button" role="tab">Notifications</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-alert" data-bs-toggle="tab" data-bs-target="#panel-alert" type="button" role="tab">Alert Screen</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-settings" data-bs-toggle="tab" data-bs-target="#panel-settings" type="button" role="tab">Settings</button>
+      </li>
+    </ul>
+  </div>
+</div>
+
+<div class="tab-content">
+
+  <!-- NOTIFICATIONS LIST -->
+  <div class="tab-pane fade show active" id="panel-notifs" role="tabpanel" aria-labelledby="tab-notifs">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="d-flex align-items-center mb-3">
+          <h2 class="h5 text-primary mb-0">Your notifications</h2>
+          <button class="btn btn-outline-secondary btn-sm ms-auto" id="btnRefreshList">Refresh</button>
+        </div>
+        <div class="table-responsive">
+          <table class="table align-middle">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Title</th>
+                <th>Message</th>
+                <th>Source</th>
+                <th>Link</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="notifsTbody">
+              <tr><td colspan="6" class="text-secondary">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="pagination" class="d-flex gap-2"></div>
+
+        <div class="mt-3 d-flex gap-2">
+          <button class="btn btn-outline-danger btn-sm" id="btnClearAll">Clear all (mark played)</button>
+          <button class="btn btn-danger btn-sm" id="btnDeleteAll">Delete all</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ALERT SCREEN -->
+  <div class="tab-pane fade" id="panel-alert" role="tabpanel" aria-labelledby="tab-alert">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="d-flex align-items-center mb-3">
+          <h2 class="h5 text-primary mb-0">Alert Screen</h2>
+          <div class="ms-auto d-flex gap-2">
+            <button class="btn btn-outline-primary btn-sm" id="btnTestSound">Test sound</button>
+            <button class="btn btn-outline-danger btn-sm" id="btnStop" disabled>Stop</button>
+          </div>
+        </div>
+
+        <div id="alertViewport" class="alert-viewport rounded-4">
+          <div class="inner text-center text-white">
+            <div class="icon">🔔</div>
+            <h1 class="title">NotiHub</h1>
+            <p class="lead" id="alertMsg">No active notification.</p>
+            <div class="d-flex justify-content-center gap-3 mt-3">
+              <a id="btnViewMessage" href="#" class="btn btn-light btn-lg fw-semibold disabled" target="_blank" rel="noopener">VIEW MESSAGE</a>
+              <button id="btnMarkPlayed" class="btn btn-outline-light btn-lg" disabled>MARK AS PLAYED</button>
+            </div>
+          </div>
+        </div>
+
+        <audio id="alarmAudio" preload="auto"></audio>
+      </div>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="tab-pane fade" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h2 class="h5 text-primary mb-3">Sound & behavior</h2>
+
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label">Volume: <span id="volLabel">80%</span></label>
+            <input type="range" class="form-range" min="0" max="100" value="80" id="volRange">
+          </div>
+          <div class="col-md-6 d-flex align-items-end">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="chkLoop" checked>
+              <label class="form-check-label" for="chkLoop">Loop until I stop</label>
+            </div>
+          </div>
+        </div>
+
+        <hr class="my-4">
+
+        <div id="currentSoundRow" class="mb-3 d-none">
+          <div class="d-flex align-items-center gap-3">
+            <div class="text-secondary small">
+              Current sound: <strong id="currentSoundName">Custom</strong>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" id="btnChangeSound">Change sound</button>
+          </div>
+        </div>
+
+        <div id="uploadSection">
+          <form id="formUpload" enctype="multipart/form-data">
+            {% csrf_token %}
+            <label class="form-label">Upload custom ringtone (.mp3/.wav)</label>
+            <input class="form-control" type="file" name="file" accept=".mp3,.wav" required>
+            <div class="form-text">Upload becomes your default immediately.</div>
+            <button class="btn btn-primary btn-sm mt-2" type="submit">Upload</button>
+            <span class="small text-success ms-2 d-none" id="uploadOk">Uploaded ✓</span>
+          </form>
+        </div>
+
+        <div class="mt-4">
+          <button class="btn btn-primary" id="btnSaveSettings">Save settings</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="toastContainer" class="position-fixed top-0 end-0 p-5"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  // --- helpers ---
+  function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m])); }
+  function showToast(title, body){
+    const box = document.getElementById('toastContainer');
+    const id = 't'+Date.now();
+    box.insertAdjacentHTML('beforeend', `
+      <div id="${id}" class="toast align-items-center text-bg-primary border-0 show" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="d-flex">
+          <div class="toast-body">
+            <strong>${escapeHtml(title)}</strong>${body?('<br>'+escapeHtml(body)) : ''}
+          </div>
+          <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+        </div>
+      </div>`);
+    setTimeout(()=>{ const el=document.getElementById(id); if(el) el.remove(); }, 5000);
+  }
+  function qs(sel){ return document.querySelector(sel); }
+  function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
+
+  // CSRF token: meta first, cookie fallback
+  function csrf(){
+    const m = document.querySelector('meta[name="csrf-token"]');
+    if (m && m.content) return m.content;
+    const name='csrftoken=';
+    return (document.cookie.split(';').find(c=>c.trim().startsWith(name))||'').split('=').pop()||'';
+  }
+
+  async function jget(url){
+    const r=await fetch(url, {credentials:'same-origin'});
+    if(!r.ok) throw new Error(r.status);
+    return r.json();
+  }
+  async function jpost(url, data){
+    const r=await fetch(url,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+      credentials:'same-origin',
+      body:JSON.stringify(data||{})
+    });
+    if(!r.ok) throw new Error(r.status);
+    return r.json();
+  }
+
+  // --- state ---
+  const audio = document.getElementById('alarmAudio');
+  let settingsState = { volume: 80, loop: true, url: null, name: null };
+  let currentNotif = null;
+  let polling = false;
+  let testingMode = false;
+
+  // --- SETTINGS LOAD/APPLY ---
+  async function loadSettings(){
+    try{
+      const data = await jget('/api/settings/');
+      const s = data.settings || {};
+      settingsState.volume = clamp(parseInt(s.volume ?? 80),0,100,80);
+      settingsState.loop = true; // always loop during alert screen
+      settingsState.url = s.default_ringtone_url || '{% static "audio/beep.mp3" %}';
+      settingsState.name = s.default_ringtone_name || 'Default';
+      applySettingsToUI();
+      applySettingsToAudio();
+    }catch{ /* keep defaults */ }
+  }
+  function applySettingsToUI(){
+    qs('#volRange').value = settingsState.volume;
+    qs('#volLabel').textContent = settingsState.volume + '%';
+    qs('#chkLoop').checked = settingsState.loop;
+    const hasCustom = !!(settingsState.url && !settingsState.url.includes('/static/audio/beep.mp3'));
+    qs('#currentSoundRow').classList.toggle('d-none', !hasCustom);
+    qs('#currentSoundName').textContent = settingsState.name || 'Custom';
+    qs('#uploadSection').classList.toggle('d-none', hasCustom);
+  }
+  function applySettingsToAudio(){
+    if (audio.src !== settingsState.url) audio.src = settingsState.url;
+    audio.volume = settingsState.volume / 100;
+    audio.loop = true;
+    audio.load();
+  }
+  function clamp(v,min,max,dflt){ if(Number.isNaN(v)) return dflt; return Math.max(min,Math.min(max,v)); }
+
+  // --- NOTIFICATIONS LIST ---
+  async function loadNotifs(page=1){
+    try{
+      const data = await jget('/api/notifications/?page='+page);
+      const results = Array.isArray(data.results) ? data.results : [];
+      const tbody = qs('#notifsTbody');
+      tbody.innerHTML = '';
+      if (results.length === 0){
+        tbody.innerHTML = '<tr><td colspan="6" class="text-secondary">No notifications yet.</td></tr>';
+      } else {
+        results.forEach(n=>{
+          const when = n.detected_at ? new Date(n.detected_at).toLocaleString() : '';
+          const status = (n.played ? 'played' : (n.seen ? 'seen' : 'new'));
+          tbody.insertAdjacentHTML('beforeend', `
+            <tr>
+              <td class="text-nowrap">${escapeHtml(when)}</td>
+              <td>${escapeHtml(n.title||'')}</td>
+              <td>${escapeHtml(n.message||'')}</td>
+              <td>${escapeHtml(n.source_name||'')}</td>
+              <td>${n.link ? '<a href="'+escapeHtml(n.link)+'" target="_blank" rel="noopener">open</a>' : ''}</td>
+              <td><span class="badge ${n.played?'bg-secondary':'bg-primary'}">${status}</span></td>
+            </tr>
+          `);
+        });
+      }
+      renderPagination(data);
+    }catch(e){
+      showToast('Error', 'Could not load notifications');
+    }
+  }
+  function renderPagination(p){
+    const box = qs('#pagination'); box.innerHTML='';
+    function btn(label, disabled, handler){
+      const b = document.createElement('button');
+      b.className = 'btn btn-sm '+(disabled?'btn-outline-secondary':'btn-outline-primary');
+      b.disabled = !!disabled; b.textContent = label;
+      if(!disabled) b.onclick = handler;
+      box.appendChild(b);
+    }
+    btn('Prev', !p.previous, ()=> gotoLink(p.previous));
+    btn('Next', !p.next, ()=> gotoLink(p.next));
+
+    function gotoLink(url){
+      const u = new URL(url, window.location.origin);
+      const page = u.searchParams.get('page') || 1;
+      loadNotifs(page);
+    }
+  }
+
+  // --- ALERT SCREEN ---
+  async function pollActive(){
+    if (!polling) return;
+    try{
+      const data = await jget('/api/notifications/active/');
+      if (data.has){
+        if (!currentNotif || currentNotif.id !== data.id){
+          currentNotif = data;
+          enterAlertMode(data);
+        }
+      }
+    }catch{}
+    setTimeout(pollActive, 4000);
+  }
+  function enterAlertMode(n){
+    const site = n.source_name || (n.link ? new URL(n.link).hostname : 'this site');
+    qs('#alertMsg').textContent = `You have a message coming from ${site}`;
+    const btnView = qs('#btnViewMessage');
+    if (n.link){ btnView.href = n.link; btnView.classList.remove('disabled'); }
+    else { btnView.href = '#'; btnView.classList.add('disabled'); }
+    qs('#btnStop').disabled = false;
+    qs('#btnMarkPlayed').disabled = false;
+
+    audio.loop = true;
+    audio.volume = settingsState.volume / 100;
+    audio.currentTime = 0;
+    audio.play().catch(()=>{});
+    qs('#alertViewport').classList.add('active');
+    testingMode = false; // real alert now
+  }
+  async function stopAlert(markPlayed){
+    audio.pause(); audio.currentTime = 0;
+    qs('#alertViewport').classList.remove('active');
+    qs('#btnStop').disabled = true;
+    qs('#btnMarkPlayed').disabled = true;
+
+    if (markPlayed && currentNotif){
+      try{ await jpost('/api/notifications/mark-read/', {ids:[currentNotif.id], played:true}); }catch{}
+      currentNotif = null;
+    }
+    testingMode = false;
+  }
+
+  // --- SETTINGS SAVE / UPLOAD ---
+  qs('#volRange').addEventListener('input', (e)=> {
+    const v = parseInt(e.target.value||'80',10);
+    qs('#volLabel').textContent = v+'%';
+    settingsState.volume = v;
+    applySettingsToAudio();
+  });
+  qs('#chkLoop').addEventListener('change', (e)=> {
+    settingsState.loop = !!e.target.checked;
+  });
+  qs('#btnSaveSettings').addEventListener('click', async ()=>{
+    try{
+      await jpost('/api/settings/', { volume: settingsState.volume, play_loop: settingsState.loop });
+      showToast('Saved', 'Settings updated');
+    }catch{ showToast('Error', 'Could not save settings'); }
+  });
+
+  qs('#btnChangeSound').addEventListener('click', ()=>{
+    qs('#uploadSection').classList.remove('d-none');
+  });
+
+  const upForm = qs('#formUpload');
+  upForm.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const fd = new FormData(upForm);
+    const r = await fetch('/api/ringtones/upload/', {
+      method:'POST',
+      headers:{'X-CSRFToken':csrf()},
+      body: fd,
+      credentials:'same-origin'
+    });
+    const json = await r.json();
+    if (json.ok){
+      settingsState.url = json.file || settingsState.url;
+      settingsState.name = (fd.get('file') && fd.get('file').name) || 'Custom';
+      applySettingsToAudio();
+      qs('#uploadOk').classList.remove('d-none');
+      qs('#currentSoundName').textContent = settingsState.name;
+      qs('#currentSoundRow').classList.remove('d-none');
+      qs('#uploadSection').classList.add('d-none');
+      showToast('Uploaded', 'New sound set as default');
+    } else {
+      showToast('Upload failed', json.error || '');
+    }
+  });
+
+  // --- LIST buttons ---
+  qs('#btnRefreshList').addEventListener('click', ()=> loadNotifs(1));
+  qs('#btnClearAll').addEventListener('click', async ()=>{
+    if (!confirm('Mark ALL notifications as played?')) return;
+    try{
+      const res = await jpost('/api/notifications/clear-all/', {});
+      if (res && res.ok){
+        await loadNotifs(1);
+        showToast('Cleared','All marked as played');
+      } else {
+        showToast('Error', (res && res.error) || 'Could not clear');
+      }
+    }catch(e){
+      showToast('Error', 'Request blocked (check login/CSRF)');
+    }
+  });
+
+  // --- DELETE ALL (hard delete) ---
+  qs('#btnDeleteAll').addEventListener('click', async ()=>{
+    if (!confirm('This will permanently delete your notifications from the database for THIS account. Continue?')) return;
+
+    let older = prompt('Delete only notifications older than N days? (Leave empty or 0 to delete ALL)', '');
+    if (older === null) return;
+    older = parseInt(older, 10);
+    if (Number.isNaN(older) || older < 0) older = 0;
+
+    try{
+      const r = await fetch('/api/notifications/delete-all/', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},
+        credentials:'same-origin',
+        body: JSON.stringify({ older_than_days: older })
+      });
+      const txt = await r.text();
+      let data = {};
+      try { data = JSON.parse(txt); } catch(_){ /* not json */ }
+      if (!r.ok || !data.ok){
+        showToast('Error', (data.error || (`HTTP ${r.status}`)));
+        return;
+      }
+      await loadNotifs(1);
+      showToast('Deleted', `Removed ${data.deleted || 0} notification(s)`);
+    }catch(e){
+      showToast('Error', 'Request blocked (check login/CSRF)');
+    }
+  });
+
+  // --- ALERT buttons ---
+  qs('#btnTestSound').addEventListener('click', ()=>{
+    testingMode = true;
+    qs('#alertMsg').textContent = 'Test sound (no active notification).';
+    const btnView = qs('#btnViewMessage');
+    btnView.href = '#'; btnView.classList.add('disabled');
+
+    qs('#btnStop').disabled = false;
+    qs('#btnMarkPlayed').disabled = true; // no marking during test
+
+    qs('#alertViewport').classList.add('active');
+    audio.currentTime = 0;
+    audio.loop = true;
+    audio.play().catch(()=>{});
+  });
+
+  qs('#btnStop').addEventListener('click', ()=>{
+    stopAlert(!testingMode); // only mark played if not testing
+  });
+
+  qs('#btnMarkPlayed').addEventListener('click', ()=>{
+    stopAlert(true); // only enabled for real alerts
+  });
+
+  // --- Tab activation logic ---
+  const tabs = qsa('#dashTabs .nav-link');
+  tabs.forEach(btn=>{
+    btn.addEventListener('shown.bs.tab', (ev)=>{
+      const target = ev.target.getAttribute('data-bs-target');
+      if (target === '#panel-notifs'){
+        polling = false;
+        stopAlert(false);
+        loadNotifs(1);
+      } else if (target === '#panel-alert'){
+        polling = true;
+        loadSettings().then(()=>{ setTimeout(pollActive, 300); });
+      } else if (target === '#panel-settings'){
+        polling = false;
+        stopAlert(false);
+        loadSettings();
+      }
+    });
+  });
+
+  // initial boot
+  loadNotifs(1);
+  loadSettings();
+
+})(); // end IIFE
+</script>
+{% endblock %}

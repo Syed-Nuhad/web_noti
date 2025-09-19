@@ -1,0 +1,73 @@
+{% extends "webnotify/base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-6">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h2 class="h5 text-primary mb-3">Notification Settings</h2>
+        <form id="settingsForm">
+          {% csrf_token %}
+          <div class="mb-3">
+            <label class="form-label">Volume (0–100)</label>
+            <input type="number" class="form-control" name="volume" id="volume" min="0" max="100">
+          </div>
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="play_loop">
+            <label class="form-check-label" for="play_loop">Loop ringtone</label>
+          </div>
+          <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" id="play_in_background">
+            <label class="form-check-label" for="play_in_background">Play in background</label>
+          </div>
+          <button class="btn btn-primary">Save</button>
+          <button type="button" id="btnTest" class="btn btn-outline-secondary ms-2">Test sound</button>
+        </form>
+
+        <hr class="my-4">
+        <h3 class="h6">Default ringtone</h3>
+        <audio id="ring" preload="auto"></audio>
+        <div class="small text-secondary" id="rtInfo">No default set.</div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(async function(){
+  const csrf = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+  const response = await fetch('/api/settings/', {credentials:'same-origin'});
+  const data = await response.json();
+  const s = data.settings || {};
+  document.getElementById('volume').value = s.volume ?? 80;
+  document.getElementById('play_loop').checked = !!s.play_loop;
+  document.getElementById('play_in_background').checked = !!s.play_in_background;
+  const ring = document.getElementById('ring');
+  if (s.default_ringtone_url){
+    ring.src = s.default_ringtone_url;
+    document.getElementById('rtInfo').textContent = s.default_ringtone_url;
+  }
+
+  document.getElementById('settingsForm').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const payload = {
+      volume: parseInt(document.getElementById('volume').value || '80'),
+      play_loop: document.getElementById('play_loop').checked,
+      play_in_background: document.getElementById('play_in_background').checked
+    };
+    await fetch('/api/settings/', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','X-CSRFToken': csrf},
+      body: JSON.stringify(payload),
+      credentials: 'same-origin'
+    });
+    alert('Saved!');
+  });
+
+  document.getElementById('btnTest').addEventListener('click', ()=>{
+    try { ring.currentTime = 0; ring.play(); } catch(e){}
+  });
+})();
+</script>
+{% endblock %}

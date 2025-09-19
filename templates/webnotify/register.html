@@ -1,0 +1,46 @@
+{% extends "webnotify/base.html" %}
+{% block title %}Register · NotiHub{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-sm-10 col-md-8 col-lg-6">
+    <div class="card shadow-sm border-0">
+      <div class="card-body p-4">
+        <h1 class="h4 text-primary mb-3">Create your account</h1>
+        <form method="post" class="needs-validation" novalidate>
+          {% csrf_token %}
+          <div class="row g-3">
+            <div class="col-12">
+              <label class="form-label">Email</label>
+              <input name="email" type="email" class="form-control" required>
+              <div class="invalid-feedback">Valid email required</div>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Password</label>
+              <input name="password" type="password" minlength="6" class="form-control" required>
+              <div class="form-text">At least 6 characters.</div>
+              <div class="invalid-feedback">Password required (min 6)</div>
+            </div>
+          </div>
+          <div class="d-grid gap-2 mt-3">
+            <button class="btn btn-primary" type="submit">Sign up</button>
+            <a class="btn btn-outline-secondary" href="{% url 'webnotify:login' %}">Back to login</a>
+          </div>
+        </form>
+      </div>
+    </div>
+    <p class="text-center small text-secondary mt-3">By signing up you agree to our basic terms.</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+  const forms = document.querySelectorAll('.needs-validation');
+  [...forms].forEach(f => f.addEventListener('submit', e => {
+    if (!f.checkValidity()) { e.preventDefault(); e.stopPropagation(); }
+    f.classList.add('was-validated');
+  }));
+})();
+</script>
+{% endblock %}

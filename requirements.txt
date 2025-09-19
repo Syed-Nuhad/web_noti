@@ -1,0 +1,13 @@
+Django~=4.2
+djangorestframework~=3.16.1
+djangorestframework-simplejwt
+celery~=5.5.3
+redis
+beautifulsoup4~=4.13.5
+lxml
+dj-database-url
+requests~=2.32.3
+future~=0.16.0
+pygame~=2.6.1
+winshell~=0.6
+playwright~=1.55.0

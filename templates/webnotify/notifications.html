@@ -1,0 +1,51 @@
+{% extends "webnotify/base.html" %}
+{% block title %}Notifications{% endblock %}
+{% block content %}
+<div class="card shadow-sm">
+  <div class="card-body">
+    <h2 class="h5 text-primary mb-3">Latest Notification</h2>
+    <div id="area">Loading…</div>
+    <div class="mt-3">
+      <button class="btn btn-outline-secondary btn-sm" id="refresh">Refresh</button>
+      <button class="btn btn-primary btn-sm" id="mark" disabled>Mark as read</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function(){
+  let currentId = null;
+
+  async function load(){
+    const res = await fetch('/api/notifications/active/', {credentials:'same-origin'});
+    const data = await res.json();
+    const area = document.getElementById('area');
+    if (!data.has){ area.textContent='No active notifications.'; currentId=null; document.getElementById('mark').disabled=true; return; }
+    currentId = data.id;
+    area.innerHTML = `
+      <div><strong>${escapeHtml(data.title || 'Notification')}</strong></div>
+      <div class="text-secondary">${escapeHtml(data.message || '')}</div>
+      ${data.link ? `<div class="mt-1"><a href="${data.link}" target="_blank">Open</a></div>` : ''}
+      <div class="small text-muted mt-1">${escapeHtml(data.source || '')}</div>
+    `;
+    document.getElementById('mark').disabled=false;
+  }
+  function escapeHtml(t){return (t||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));}
+
+  document.getElementById('refresh').addEventListener('click', load);
+  document.getElementById('mark').addEventListener('click', async ()=>{
+    if (!currentId) return;
+    await fetch('/api/notifications/mark-read/', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-CSRFToken': (document.querySelector('[name=csrfmiddlewaretoken]')?.value || '')},
+      body: JSON.stringify({ids:[currentId], played:true}),
+      credentials:'same-origin'
+    });
+    load();
+  });
+
+  load();
+})();
+</script>
+{% endblock %}

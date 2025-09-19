@@ -1,0 +1,54 @@
+version: "3.8"
+services:
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6380:6379"       # host:container (we map host 6380 -> container 6379)
+    volumes:
+      - redisdata:/data
+
+  web:
+    build: .
+    command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - ./:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_DEBUG=True
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: sh -c "celery -A webnotify_project worker -l info"
+    volumes:
+      - ./:/app
+      - ./media:/app/media
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - web
+    restart: unless-stopped
+
+  beat:
+    build: .
+    command: sh -c "celery -A webnotify_project beat -l info"
+    volumes:
+      - ./:/app
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - web
+    restart: unless-stopped
+
+volumes:
+  redisdata:

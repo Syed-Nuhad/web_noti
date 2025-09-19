@@ -1,0 +1,128 @@
+/* =========================================================
+   MsgNotify — styles.css (REPLACE YOUR FILE WITH THIS)
+   ========================================================= */
+
+/* ---- Base & variables ---- */
+:root {
+  --mn-primary: #2b7cff;   /* little blue */
+  --mn-bg: #f8fbff;        /* soft page background */
+  --bs-primary: var(--mn-primary);
+  --bs-link-color: var(--mn-primary);
+  --bs-link-hover-color: #1f63cc;
+}
+
+:root{
+  --bs-primary:#2b7cff;
+  --bs-body-bg:#f8fbff;
+}
+.bg-body{ background-color:var(--bs-body-bg)!important; }
+.card{ border-radius:1rem; }
+.btn,.form-control{ border-radius:.75rem; }
+.navbar .nav-link.active{ font-weight:600; color:var(--bs-primary)!important; }
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background-color: #ffffff; /* white theme base */
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+/* Light background panel style (used by <body class="bg-body">) */
+[data-bs-theme="light"] .bg-body { background-color: var(--mn-bg) !important; }
+
+/* ---- Sticky footer layout (CRITICAL) ----
+   Your base.html must wrap content with:
+   <div id="app"> ... <main id="main-content"> ... </main> ... </div>
+*/
+#app {
+  min-height: 100vh;                 /* fill viewport height */
+  min-height: 100dvh;                /* mobile-friendly */
+  display: flex;
+  flex-direction: column;
+}
+main#main-content {
+  flex: 1 0 auto;                    /* grows to push footer down */
+}
+
+/* ---- Navbar / brand ---- */
+.navbar-brand { letter-spacing: .1px; }
+.navbar { backdrop-filter: saturate(120%) blur(2px); }
+
+/* ---- Cards / controls ---- */
+.card { border-radius: 1rem; }
+.btn, .form-control, .form-select { border-radius: .75rem; }
+
+/* ---- Footer ---- */
+.site-footer .brand-dot{
+  width: 28px; height: 28px; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, #6ea8ff, var(--mn-primary));
+  display: inline-block;
+}
+.site-footer .nav-link { font-size: .95rem; }
+.site-footer .nav-link:hover { color: var(--mn-primary) !important; }
+
+/* ---- Toast container (global) ---- */
+#toastContainer { z-index: 1080; }
+
+/* ---- Notification modal (your earlier styles, corrected) ---- */
+.notification-modal {
+  position: fixed; inset: 0;
+  background-color: rgba(255, 255, 255, 0.9);
+  display: none;                     /* set to flex via JS when showing */
+  justify-content: center;
+  align-items: center;
+  z-index: 1100;
+}
+.notification-content {
+  text-align: center;
+  padding: 20px;
+  max-width: min(90vw, 640px);
+  background: #fff;
+  border-radius: 1rem;
+  box-shadow: 0 10px 30px rgba(0,0,0,.08);
+}
+
+/* ---- Utility helpers (optional) ---- */
+.center-60vh { min-height: 60vh; display: flex; align-items: center; justify-content: center; }
+.text-faint  { color: #6c757d; }
+
+/* ---- Responsive polish ---- */
+@media (max-width: 575.98px) {
+  .site-footer .nav { justify-content: flex-start !important; }
+}
+#toastContainer { z-index: 2000; }
+
+
+
+/* Global toast root — always on top of EVERYTHING */
+.mn-toast-root{
+  position: fixed;
+  top: 16px; right: 16px;
+  left: auto; bottom: auto;
+  z-index: 2147483647;     /* max practical z-index */
+  pointer-events: none;    /* allows clicks to pass except on the toast itself */
+}
+.mn-toast-root .toast{
+  pointer-events: auto;    /* you can click close button */
+  box-shadow: 0 10px 30px rgba(0,0,0,.15);
+  border-radius: .75rem;
+}
+
+/* Full alert viewport */
+.alert-viewport{
+  background: #0d1b2a;
+  border: 1px solid rgba(255,255,255,.08);
+  min-height: 55vh;
+  display: grid;
+  place-items: center;
+  transition: box-shadow .2s ease, transform .2s ease;
+}
+.alert-viewport.active{
+  box-shadow: 0 10px 50px rgba(0,0,0,.35), 0 0 0 4px rgba(43,124,255,.25) inset;
+  transform: translateY(-1px);
+}
+.alert-viewport .inner .icon{ font-size: 64px; line-height: 1; }
+.alert-viewport .inner .title{ color: #fff; font-weight: 800; letter-spacing: .2px; margin-top:.25rem; }
+.alert-viewport .inner .lead{ color: #cfe2ff; }
+
+
