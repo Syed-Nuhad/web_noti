@@ -1,6 +1,6 @@
-import os, sys, json, argparse, requests, tempfile
+import os, sys, json, time, argparse, requests, tempfile
 from urllib.parse import urljoin, urlparse
-from playwright.sync_api import sync_playwright  # <-- make sure playwright is installed
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # make sure playwright is installed
 
 # ENV: WN_BASE_URL, WN_API_KEY
 BASE_URL = os.getenv("WN_BASE_URL", "http://127.0.0.1:8000/")
@@ -12,30 +12,104 @@ COOKIES_URL = urljoin(BASE_URL, "api/source/import_cookies_key/")
 def log(*a):
     print("[link]", *a, flush=True)
 
+
 def get_cookies_with_playwright(login_url: str) -> dict:
     """
-    Opens a visible Chromium window at login_url using a temporary user profile.
-    You log in, then COME BACK TO THE TERMINAL and press ENTER. We capture cookies and close.
+    Launch a real browser channel (Chrome → Edge → Chromium) with a persistent profile.
+    GPU + automation flags are adjusted to avoid blank popups. You log in, then press ENTER.
+    We capture cookies from the whole profile and return them.
     """
-    with tempfile.TemporaryDirectory() as user_data_dir:
-        with sync_playwright() as pw:
-            ctx = pw.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                headless=False,
-                args=["--disable-gpu-sandbox", "--no-sandbox"],
-            )
-            page = ctx.new_page()
-            print("[link] Opening Chromium…")
-            page.goto(login_url, timeout=60000)
-            print("[link] Complete login in the browser window.")
-            input("[link] When you are logged in (you can see your inbox), press ENTER here… ")
-            cookies_list = ctx.cookies()
-            ctx.close()
+    profile_dir = os.path.join(os.path.dirname(__file__), ".pw_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
+    def launch(pw, channel):
+        args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-extensions",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-gpu",  # helps blank popup/renderer issues on some Windows setups
+            "--disable-renderer-backgrounding",
+            "--disable-features=IsolateOrigins,site-per-process",
+        ]
+        return pw.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=False,
+            channel=channel,     # "chrome", "msedge", or None for bundled chromium
+            args=args,
+            viewport={"width": 1280, "height": 800},
+        )
+
+    with sync_playwright() as pw:
+        ctx = None
+        for channel in ("chrome", "msedge", None):
+            try:
+                ctx = launch(pw, channel)
+                break
+            except Exception:
+                ctx = None
+        if ctx is None:
+            raise RuntimeError("Could not launch Chrome/Edge/Chromium")
+
+        # Set a normal UA on each new page
+        def set_headers(page):
+            try:
+                page.set_extra_http_headers({
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+                    )
+                })
+            except Exception:
+                pass
+
+        page = ctx.new_page()
+        set_headers(page)
+        print("[link] Opening browser…")
+        page.goto(login_url, wait_until="domcontentloaded", timeout=90_000)
+
+        # Listen for popup (Google SSO) and bring it to front
+        popup = None
+        def on_page(new_page):
+            nonlocal popup
+            popup = new_page
+            set_headers(popup)
+        ctx.on("page", on_page)
+
+        # Give the site a moment to open its SSO popup (if any)
+        time.sleep(2)
+
+        # If a popup exists but is blank, navigate it directly to Google Accounts
+        try:
+            if popup and (not popup.url or "about:blank" in popup.url):
+                print("[link] Popup detected but blank; navigating to Google Accounts…")
+                popup.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=90_000)
+        except Exception:
+            pass
+
+        # If no popup, open a new tab to Google Accounts manually (helps SSO)
+        if not popup:
+            print("[link] No popup detected; opening Google Accounts in a new tab…")
+            popup = ctx.new_page()
+            set_headers(popup)
+            try:
+                popup.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=90_000)
+            except PWTimeout:
+                print("[link] Google Accounts timed out; you can type the URL manually in that tab.")
+
+        print("[link] In the browser: complete login (Google or site login).")
+        print("[link] If a window looks blank: refresh it or navigate to https://accounts.google.com/")
+        input("[link] After you can see you’re logged in (inbox visible), press ENTER here to capture cookies… ")
+
+        cookies_list = ctx.cookies()
+        ctx.close()
 
     jar = {}
     for c in cookies_list:
         jar[c["name"]] = c["value"]
     return jar
+
 
 def get_cookies_for_domain(domain: str) -> dict:
     """
@@ -97,6 +171,7 @@ def get_cookies_for_domain(domain: str) -> dict:
     log("cookie tried:", ", ".join(tried) or "none")
     return cookies
 
+
 def main():
     if not API_KEY:
         raise SystemExit("Set WN_API_KEY to your real key.")
@@ -104,7 +179,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True, help="App name (e.g., Fiverr)")
     ap.add_argument("--url",  required=True, help="Inbox URL (e.g., https://www.fiverr.com/inbox)")
-    ap.add_argument("--login", action="store_true", help="Open Chromium to log in and capture cookies")
+    ap.add_argument("--login", action="store_true", help="Open browser to log in and capture cookies")
     args = ap.parse_args()
 
     headers = {"Authorization": f"ApiKey {API_KEY}", "Content-Type": "application/json"}
@@ -147,6 +222,7 @@ def main():
         log("continuing without cookies (public pages only)")
 
     log("done.")
+
 
 if __name__ == "__main__":
     main()

@@ -1,9 +1,42 @@
-# Django
-*.sqlite3
-secret.key
+# Python / Django
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.log
 .env
 .env.*
-/venv/
-__pycache__/
-*.pyc
+.venv/
+venv/
+db.sqlite3
+celerybeat-schedule
+secret.key
+
+# Media / user files
+media/
+ringtones/
+staticfiles/
+
+# Desktop client test files
+desktop_client/_ringtone.bin
+desktop_client/test.mp3
+
+# Redis binaries
+Redis-x64-3.0.504/
+
+# IDE / OS
+.vscode/
+.idea/
 .DS_Store
+Thumbs.db
+
+# Playwright cache
+playwright/.cache/
+.playwright/
+
+# Tests / coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
