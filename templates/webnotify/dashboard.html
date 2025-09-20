@@ -135,6 +135,18 @@
 
 </div>
 
+<!--   Desktop notify      -->
+
+<div id="notifier-card" style="margin-top:16px;padding:16px;border:1px solid #ddd;border-radius:8px;background:#fff;max-width:520px">
+  <h3 style="margin:0 0 8px">Desktop Notifier</h3>
+  <p id="notifier-status" style="margin:4px 0;color:#555">Status: …</p>
+  <button id="toggle-notifier" type="button" style="padding:8px 14px;border-radius:6px;border:0;background:#0d6efd;color:#fff;font-weight:600;cursor:pointer">
+    Loading…
+  </button>
+</div>
+
+<!--End desktop notify-->
+
 <div id="toastContainer" class="position-fixed top-0 end-0 p-5"></div>
 {% endblock %}
 
@@ -455,5 +467,68 @@
   loadSettings();
 
 })(); // end IIFE
+
+// Start Desktop notify
+
+
+(async function() {
+  const statusEl = document.getElementById("notifier-status");
+  const btn = document.getElementById("toggle-notifier");
+
+  // 1) fetch current settings from the normal authed API (DRF) if you prefer,
+  //    but we already render the page server-side, so we’ll read once from a tiny JSON template block.
+  //    Simpler: we ask the server quickly:
+  async function getSettings() {
+    try {
+      const r = await fetch("/api/settings/", { headers: {"X-Requested-With":"fetch"} });
+      if (!r.ok) throw new Error("settings fail");
+      const js = await r.json();
+      return js.settings || {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function setUI(on) {
+    statusEl.textContent = "Status: " + (on ? "ON (will pop 24/7)" : "OFF (paused)");
+    btn.textContent = on ? "Turn OFF" : "Turn ON";
+    btn.dataset.on = on ? "1" : "0";
+    btn.style.background = on ? "#dc3545" : "#198754"; // red off vs green on
+  }
+
+  // initial
+  let settings = await getSettings();
+  setUI(!!settings.play_in_background);
+
+  // 2) toggle
+  btn.addEventListener("click", async () => {
+    const wantOn = btn.dataset.on !== "1";
+    try {
+      const r = await fetch("/api/settings/set_play_in_background/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": (document.cookie.match(/csrftoken=([^;]+)/)||[])[1] || ""
+        },
+        body: JSON.stringify({ on: wantOn })
+      });
+      const js = await r.json();
+      if (js.ok) {
+        setUI(!!js.play_in_background);
+      } else {
+        alert("Failed to update: " + (js.error || "unknown"));
+      }
+    } catch (e) {
+      alert("Network error updating setting.");
+    }
+  });
+})();
+
+
+
+// End Desktop notify
+
 </script>
+
+
 {% endblock %}

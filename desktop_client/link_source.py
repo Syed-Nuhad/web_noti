@@ -15,100 +15,113 @@ def log(*a):
 
 def get_cookies_with_playwright(login_url: str) -> dict:
     """
-    Launch a real browser channel (Chrome → Edge → Chromium) with a persistent profile.
-    GPU + automation flags are adjusted to avoid blank popups. You log in, then press ENTER.
-    We capture cookies from the whole profile and return them.
+    Opens a real Chrome/Edge/Chromium with a persistent profile to let you log in.
+    After you press ENTER in the terminal, we read cookies from storage_state().
+    If you accidentally closed the window, we relaunch the same profile just to read cookies.
     """
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Error as PWError
+    import time
+    import json
+
     profile_dir = os.path.join(os.path.dirname(__file__), ".pw_profile")
     os.makedirs(profile_dir, exist_ok=True)
 
-    def launch(pw, channel):
+    def launch_ctx(pw, channel):
         args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-extensions",
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--no-default-browser-check",
-            "--disable-gpu",  # helps blank popup/renderer issues on some Windows setups
+            "--disable-gpu",
             "--disable-renderer-backgrounding",
             "--disable-features=IsolateOrigins,site-per-process",
+            "--password-store=basic",
         ]
         return pw.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
             headless=False,
-            channel=channel,     # "chrome", "msedge", or None for bundled chromium
+            channel=channel,           # "chrome", "msedge", or None
             args=args,
             viewport={"width": 1280, "height": 800},
         )
 
+    def read_cookies_from_ctx(ctx) -> dict:
+        # storage_state returns {"cookies":[...], "origins":[...]}
+        state = ctx.storage_state()
+        cookies_list = (state or {}).get("cookies", [])
+        jar = {}
+        for c in cookies_list:
+            # keep simple name -> value map; server doesn’t need full cookie objects
+            jar[c.get("name")] = c.get("value")
+        return jar
+
     with sync_playwright() as pw:
         ctx = None
+        # Try Chrome → Edge → bundled Chromium
         for channel in ("chrome", "msedge", None):
             try:
-                ctx = launch(pw, channel)
+                ctx = launch_ctx(pw, channel)
                 break
             except Exception:
                 ctx = None
         if ctx is None:
             raise RuntimeError("Could not launch Chrome/Edge/Chromium")
 
-        # Set a normal UA on each new page
-        def set_headers(page):
+        # Open a page and guide the login
+        page = ctx.new_page()
+        try:
+            page.set_extra_http_headers({
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+                )
+            })
+        except PWError:
+            pass
+
+        print("[link] Opening browser…")
+        try:
+            page.goto(login_url, wait_until="domcontentloaded", timeout=90_000)
+        except PWTimeout:
+            print("[link] Initial load timed out; you can still log in manually in that window.")
+
+        # If Google SSO pops a window and it’s blank, manual hint:
+        print("[link] Log in in the browser window. If a popup is blank, refresh it or open https://accounts.google.com/")
+        print("[link] IMPORTANT: Do NOT close the browser entirely. Just finish login and come back here.")
+        input("[link] When you can see you’re logged in, press ENTER here to capture cookies… ")
+
+        # Try to read cookies without closing the context
+        try:
+            jar = read_cookies_from_ctx(ctx)
+        except PWError:
+            jar = {}
+
+        # If the context was closed by accident, relaunch profile and read cookies
+        if not jar:
             try:
-                page.set_extra_http_headers({
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-                    )
-                })
+                ctx.close()
             except Exception:
                 pass
+            try:
+                ctx = launch_ctx(pw, "chrome")
+            except Exception:
+                try:
+                    ctx = launch_ctx(pw, "msedge")
+                except Exception:
+                    ctx = launch_ctx(pw, None)
+            # No navigation needed; just read storage_state from persisted profile
+            try:
+                jar = read_cookies_from_ctx(ctx)
+            except PWError:
+                jar = {}
 
-        page = ctx.new_page()
-        set_headers(page)
-        print("[link] Opening browser…")
-        page.goto(login_url, wait_until="domcontentloaded", timeout=90_000)
-
-        # Listen for popup (Google SSO) and bring it to front
-        popup = None
-        def on_page(new_page):
-            nonlocal popup
-            popup = new_page
-            set_headers(popup)
-        ctx.on("page", on_page)
-
-        # Give the site a moment to open its SSO popup (if any)
-        time.sleep(2)
-
-        # If a popup exists but is blank, navigate it directly to Google Accounts
         try:
-            if popup and (not popup.url or "about:blank" in popup.url):
-                print("[link] Popup detected but blank; navigating to Google Accounts…")
-                popup.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=90_000)
+            ctx.close()
         except Exception:
             pass
 
-        # If no popup, open a new tab to Google Accounts manually (helps SSO)
-        if not popup:
-            print("[link] No popup detected; opening Google Accounts in a new tab…")
-            popup = ctx.new_page()
-            set_headers(popup)
-            try:
-                popup.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=90_000)
-            except PWTimeout:
-                print("[link] Google Accounts timed out; you can type the URL manually in that tab.")
-
-        print("[link] In the browser: complete login (Google or site login).")
-        print("[link] If a window looks blank: refresh it or navigate to https://accounts.google.com/")
-        input("[link] After you can see you’re logged in (inbox visible), press ENTER here to capture cookies… ")
-
-        cookies_list = ctx.cookies()
-        ctx.close()
-
-    jar = {}
-    for c in cookies_list:
-        jar[c["name"]] = c["value"]
-    return jar
+    return jar or {}
 
 
 def get_cookies_for_domain(domain: str) -> dict:
@@ -179,6 +192,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True, help="App name (e.g., Fiverr)")
     ap.add_argument("--url",  required=True, help="Inbox URL (e.g., https://www.fiverr.com/inbox)")
+    ap.add_argument("--rendered", action="store_true",
+                    help="Use headless browser rendering for this source (for dynamic pages).")
+
     ap.add_argument("--login", action="store_true", help="Open browser to log in and capture cookies")
     args = ap.parse_args()
 
@@ -186,6 +202,8 @@ def main():
 
     # 1) Create source on the server
     create_payload = {"key": API_KEY, "name": args.name, "check_url": args.url}
+    if args.rendered:
+        create_payload["rendered"] = True
     r = requests.post(CREATE_URL, headers=headers, data=json.dumps(create_payload), timeout=20)
     if r.status_code != 200:
         print("[link] create failed:", r.status_code, r.text, file=sys.stderr)

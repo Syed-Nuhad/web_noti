@@ -47,6 +47,8 @@ urlpatterns = [
     path("api/source/import_cookies_key/", views.source_import_cookies_by_key, name="source_import_cookies_by_key"),
     path("api/settings/update_key/", views.settings_update_by_key, name="settings_update_by_key"),
 
+    path("api/settings/set_play_in_background/", views.set_play_in_background, name="set_play_in_background"),
+
 ]
 
 if settings.DEBUG:

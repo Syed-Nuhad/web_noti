@@ -1,8 +1,11 @@
 # webnotify/tasks.py
+from contextlib import contextmanager
 import hashlib
 import logging
 import re
 from typing import Dict, Tuple, Optional
+import os
+
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -43,7 +46,9 @@ def _fingerprint_response(resp: requests.Response) -> Tuple[str, str, str]:
     """Return (etag, last_modified, sha256(body)). Empty strings if missing."""
     etag = resp.headers.get("ETag", "") or ""
     last_mod = resp.headers.get("Last-Modified", "") or ""
-    body_hash = hashlib.sha256(resp.content or b"").hexdigest()
+    # resp may be our fake object in rendered mode
+    body = getattr(resp, "content", b"") or b""
+    body_hash = hashlib.sha256(body).hexdigest()
     return etag, last_mod, body_hash
 
 def _load_previous_fingerprint(extra: Dict) -> Tuple[str, str, str]:
@@ -133,20 +138,19 @@ def _extract_count_from_text(soup_text: str) -> Optional[int]:
 
 def _hash_text(txt: str) -> str:
     return hashlib.sha256(txt.encode("utf-8", "ignore")).hexdigest()
-def _build_session(headers: Dict, cookies: Dict, timeout_connect=8, timeout_read=15) -> requests.Session:
+
+def _build_session(headers: Dict, cookies: Dict, timeout_connect=5, timeout_read=8) -> requests.Session:
     """
-    Build a requests session with sane retries and connect/read timeouts.
+    Build a requests session with retries and separate connect/read timeouts.
     """
     sess = requests.Session()
+    sess.trust_env = False  # ignore system proxies (can cause stalls)
     sess.headers.update(headers)
     if cookies:
         sess.cookies.update(cookies)
 
     retry = Retry(
-        total=2,                # two retries on transient failures
-        connect=2,
-        read=2,
-        status=2,
+        total=2, connect=2, read=2, status=2,
         backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET", "HEAD", "OPTIONS"],
@@ -155,11 +159,119 @@ def _build_session(headers: Dict, cookies: Dict, timeout_connect=8, timeout_read
     adapter = HTTPAdapter(max_retries=retry, pool_maxsize=10)
     sess.mount("http://", adapter)
     sess.mount("https://", adapter)
-
-    # we’ll pass the (connect, read) timeout tuple to .get(...) where we call it
-    sess._wn_timeout = (timeout_connect, timeout_read)  # attach for convenience
     return sess
 
+# --------------------- optional Playwright rendered fetch ---------
+
+try:
+    from playwright.sync_api import sync_playwright  # noqa: F401
+    _PW_AVAILABLE = True
+except Exception:
+    _PW_AVAILABLE = False
+
+@contextmanager
+def _playwright_ctx():
+    if not _PW_AVAILABLE:
+        yield None, None
+        return
+    from playwright.sync_api import sync_playwright as _sp  # local import
+    pw = _sp().start()
+    ctx = None
+    try:
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir="/tmp/wn_pw_profile",
+            headless=True,
+            viewport={"width": 1280, "height": 800},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-renderer-backgrounding",
+            ],
+        )
+        yield pw, ctx
+    finally:
+        try:
+            if ctx:
+                ctx.close()
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
+
+def _fetch_rendered_html(url: str, cookies: dict, user_data_dir: str = None, wait_ms: int = 3000) -> str:
+    """
+    Generic dynamic-page fetcher using Playwright with a persistent profile.
+    No site-specific logic. Returns HTML string or "" on failure.
+    """
+    if not _PW_AVAILABLE:
+        logger.warning("Playwright not available for rendered fetch.")
+        return ""
+
+    # Persistent profile so logins persist across runs
+    if not user_data_dir:
+        base = os.path.dirname(os.path.dirname(__file__))  # project root-ish
+        user_data_dir = os.path.join(base, "desktop_client", ".pw_profile")
+
+    html = ""
+    from playwright.sync_api import sync_playwright as _sp
+    with _sp() as pw:
+        ctx = None
+        # Try Chrome → Edge → bundled Chromium
+        for channel in ("chrome", "msedge", None):
+            try:
+                ctx = pw.chromium.launch_persistent_context(
+                    user_data_dir=user_data_dir,
+                    headless=True,
+                    channel=channel,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--disable-gpu",
+                        "--disable-renderer-backgrounding",
+                        "--disable-features=IsolateOrigins,site-per-process",
+                        "--password-store=basic",
+                    ],
+                    viewport={"width": 1366, "height": 850},
+                )
+                break
+            except Exception:
+                ctx = None
+        if ctx is None:
+            logger.warning("Could not launch any Chromium channel for rendered fetch.")
+            return ""
+
+        page = ctx.new_page()
+
+        # Optional: seed cookies (usually not needed if profile already has them)
+        if cookies:
+            try:
+                cookie_list = []
+                for k, v in cookies.items():
+                    cookie_list.append({"name": k, "value": v, "path": "/", "httpOnly": False, "secure": True})
+                if cookie_list:
+                    ctx.add_cookies(cookie_list)
+            except Exception:
+                pass
+
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(wait_ms)  # allow client JS to render
+            html = page.content()
+        except Exception as e:
+            logger.warning("Rendered fetch failed for %s: %s", url, e)
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+    return html
 
 # -------------------------- main task -----------------------------
 
@@ -167,58 +279,90 @@ def _build_session(headers: Dict, cookies: Dict, timeout_connect=8, timeout_read
 def check_source(source_id: int) -> bool:
     """
     Real checker (no CSS selector needed):
-      1) Fetch page with stored cookies.
-      2) Baseline on first run (fingerprint + counts, no notify).
-      3) On later runs, if unread-count increases → notify.
-         Else if ETag/Last-Modified/body hash changed → generic notify.
+      1) Fetch page (requests by default; Playwright if extra_config.rendered == True).
+      2) Baseline on first run OR whenever fetch mode changes (no notify).
+      3) Notify only when:
+           - unread COUNT increases, OR
+           - (fallback) visible text containing inbox/message keywords changed.
+      4) Update baseline every run.
+
     Returns:
       True  = a new Notification was created
-      False = no new Notification
+      False = no new Notification (or baseline/update only)
     """
+    # ---------- load source ----------
     try:
         source = NotificationSource.objects.select_related("user").get(pk=source_id, enabled=True)
     except NotificationSource.DoesNotExist:
         return False
 
-    extra = _get_extra(source)
+    extra        = _get_extra(source)                # dict
+    use_rendered = bool(extra.get("rendered", False))
+    prev_mode    = extra.get("mode") or "requests"   # previous fetch mode recorded in baseline
+    cur_mode     = "rendered" if use_rendered else "requests"
+
     cookies = _build_cookies(extra)
     headers = _build_headers(extra)
-    timeout = int(extra.get("timeout", 25))  # internal; not shown to users
 
-    # ---- fetch
-    # ---- fetch (with retries + separate connect/read timeouts)
+    # ---------- fetch HTML (requests first; rendered if flagged or failed) ----------
+    html_text: Optional[str] = None
+    resp_for_fp = None
+
+    # Fast path
     try:
-        # allow per-source internal override (not exposed to users)
         tout = extra.get("timeout")
         if isinstance(tout, (int, float)):
             connect_t, read_t = max(2, int(tout) // 2), max(5, int(tout))
         else:
-            connect_t, read_t = 8, 15
+            connect_t, read_t = 5, 8
+
+        headers["Connection"] = "close"
 
         sess = _build_session(headers, cookies, timeout_connect=connect_t, timeout_read=read_t)
         r = sess.get(
             source.check_url,
-            timeout=sess._wn_timeout,  # (connect, read)
+            timeout=(connect_t, read_t),
             allow_redirects=True,
         )
         r.raise_for_status()
-        html_bytes = r.content or b""
-        html_text = r.text
-
+        html_text   = r.text
+        resp_for_fp = r
     except Exception as e:
         logger.warning("Fetch failed for %s: %s", source.check_url, e)
+
+    # Rendered fallback (only if enabled or requests failed)
+    if use_rendered or html_text is None:
+        try:
+            rendered = _fetch_rendered_html(
+                source.check_url,
+                cookies=cookies,
+                # fixed: pass wait_ms (helper doesn't accept timeout_ms)
+                wait_ms=int(extra.get("render_timeout_ms", 15000)),
+            )
+            if rendered:
+                html_text = rendered
+
+                # Shim for fingerprint (no HTTP headers in rendered mode)
+                class _FakeResp:
+                    headers = {}
+                    def __init__(self, body: str): self.content = body.encode("utf-8", "ignore")
+                resp_for_fp = _FakeResp(rendered)
+        except Exception as e:
+            logger.warning("Rendered fetch failed for %s: %s", source.check_url, e)
+
+    if html_text is None or resp_for_fp is None:
         source.last_checked = timezone.now()
         source.save(update_fields=["last_checked"])
         return False
 
-    # ---- fingerprint (HTTP + body)
-    etag, last_mod, body_hash = _fingerprint_response(r)
+    # ---------- fingerprint + parse ----------
+    etag, last_mod, body_hash = _fingerprint_response(resp_for_fp)
     prev_etag, prev_last, prev_hash = _load_previous_fingerprint(extra)
 
-    # ---- parse counts (HTML)
     soup = BeautifulSoup(html_text, "html.parser")
     text = _visible_text(soup)
-    prev_count = extra.get("last_count")
+
+    prev_count   = extra.get("last_count")
     parsed_count = (
         _extract_count_from_title(soup)
         or _extract_count_from_aria_or_badges(soup)
@@ -226,23 +370,25 @@ def check_source(source_id: int) -> bool:
     )
     text_hash = _hash_text(text)
 
-    # ---- first run: baseline everything, no notify
-    if not (prev_etag or prev_last or prev_hash or prev_count is not None):
+    # ---------- baseline if first run OR fetch mode changed ----------
+    # This prevents false "new" alerts when you just switched to rendered mode
+    if (prev_etag, prev_last, prev_hash, prev_count) == ("", "", "", None) or (prev_mode != cur_mode):
         extra = _store_fingerprint(extra, etag, last_mod, body_hash)
         if parsed_count is not None:
             extra["last_count"] = int(parsed_count)
+            extra.pop("last_hash", None)
         else:
             extra["last_hash"] = text_hash
+            extra.pop("last_count", None)
+        extra["mode"] = cur_mode
         _save_extra(source, extra)
         return False
 
     created = False
-    reasons = []
 
-    # ---- preferred: unread count increase
+    # ---------- preferred: unread-count increased ----------
     if parsed_count is not None:
         if prev_count is None:
-            # baseline count
             extra["last_count"] = int(parsed_count)
         else:
             if int(parsed_count) > int(prev_count):
@@ -260,49 +406,40 @@ def check_source(source_id: int) -> bool:
                 extra["last_count"] = int(parsed_count)
                 created = True
             else:
-                # update count anyway
+                # Update baseline even if not increased (so future increases work correctly)
                 extra["last_count"] = int(parsed_count)
 
-    # ---- fallback: content changed (only if count didn’t already create)
-    if not created:
-        changed = False
-        if etag and etag != prev_etag:
-            changed = True
-            reasons.append("etag changed")
-        if last_mod and last_mod != prev_last:
-            changed = True
-            reasons.append("last-modified changed")
-        if body_hash != prev_hash:
-            changed = True
-            reasons.append("content changed")
-        # also compare visible text hash when we don't have counts
-        if parsed_count is None:
-            prev_text_hash = extra.get("last_hash")
-            if prev_text_hash is None:
+    # ---------- fallback: only notify if KEYWORD text changed ----------
+    # If count didn't trigger, require inbox/message keywords AND changed visible text.
+    if not created and parsed_count is None:
+        prev_text_hash = extra.get("last_hash")
+        contains_keywords = bool(KEYWORDS.search(text))
+        if prev_text_hash is None:
+            extra["last_hash"] = text_hash  # baseline
+        else:
+            if contains_keywords and text_hash != prev_text_hash:
+                preview = text[:200] + ("…" if len(text) > 200 else "")
+                with transaction.atomic():
+                    Notification.objects.create(
+                        user=source.user,
+                        source=source,
+                        title=f"Activity on {source.name}",
+                        message=preview if preview.strip() else "Page changed",
+                        link=source.check_url,
+                        detected_at=timezone.now(),
+                        seen=False,
+                        played=False,
+                        meta={"detector": "text-hash", "keywords": True},
+                    )
                 extra["last_hash"] = text_hash
-            elif text_hash != prev_text_hash:
-                changed = True
-                reasons.append("visible text changed")
+                created = True
+            else:
+                # quiet re-baseline (no keywords or no real change)
                 extra["last_hash"] = text_hash
 
-        if changed:
-            preview = text[:200] + ("…" if len(text) > 200 else "")
-            with transaction.atomic():
-                Notification.objects.create(
-                    user=source.user,
-                    source=source,
-                    title=f"Activity on {source.name}",
-                    message=preview if preview.strip() else "Page changed",
-                    link=source.check_url,
-                    detected_at=timezone.now(),
-                    seen=False,
-                    played=False,
-                    meta={"detector": "fingerprint", "reasons": reasons},
-                )
-            created = True
-
-    # ---- persist new baseline
+    # ---------- persist updated baseline (fingerprint + mode) ----------
     extra = _store_fingerprint(extra, etag, last_mod, body_hash)
+    extra["mode"] = cur_mode
     _save_extra(source, extra)
 
     return created

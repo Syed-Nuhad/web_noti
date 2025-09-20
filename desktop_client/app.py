@@ -12,6 +12,8 @@ ACTIVE_URL = urljoin(BASE_URL, "api/active_notification/")
 MARK_URL   = urljoin(BASE_URL, "api/mark_notifications_read/")
 SOUND_URL  = urljoin(BASE_URL, "api/sound/")
 
+SETTINGS_KEY_URL = urljoin(BASE_URL, "api/settings_key/")
+
 import pygame
 pygame.mixer.init()
 
@@ -263,13 +265,45 @@ def main():
         log("ERROR: Set WN_API_KEY to a REAL user API key.")
         return
 
+    paused_logged = None  # track last pause state to avoid spam
     while True:
         try:
+            st = fetch_settings()
+            allow = bool(st.get("play_in_background", True))
+            if not allow:
+                if paused_logged is not True:
+                    log("paused by server setting (play_in_background = false)")
+                    paused_logged = True
+                time.sleep(max(POLL_SEC, 10))
+                continue
+            else:
+                if paused_logged is not False:
+                    log("resumed (play_in_background = true)")
+                    paused_logged = False
+
             changed = run_once()
         except Exception as e:
             log(f"poll error: {e}")
         time.sleep(POLL_SEC)
 
-if __name__ == "__main__":
-    main()
+
+
+#
+
+def fetch_settings():
+    """
+    Reads settings via ?key=APIKEY:
+      /api/settings_key/?key=...
+    Returns dict or {}.
+    """
+    try:
+        r = requests.get(SETTINGS_KEY_URL, params={"key": API_KEY}, timeout=15)
+        r.raise_for_status()
+        js = r.json()
+        if js.get("ok") and "settings" in js:
+            return js["settings"]
+    except Exception as e:
+        log(f"settings fetch error: {e}")
+    return {}
+
 

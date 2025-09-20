@@ -11,6 +11,7 @@ from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from django.utils import timezone
 from django.conf import settings
+from django.views.decorators.http import require_POST
 
 from .models import Notification, NotificationSource, CustomRingtone, UserSettings, NotificationSound
 
@@ -328,8 +329,33 @@ def sources_page(request):
 def notifications_page(request):
     return render(request, "webnotify/notifications.html")
 
+#
 
+@login_required
+@require_POST
+def set_play_in_background(request):
+    """
+    POST /api/settings/set_play_in_background/
+    body (form or JSON): {"on": true|false}
+    """
+    try:
+        body = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        body = {}
+    # allow form fallback
+    if "on" in request.POST and "on" not in body:
+        v = request.POST.get("on", "true").strip().lower()
+        body["on"] = v in ("1", "true", "yes", "on")
 
+    on = bool(body.get("on", True))
+
+    us, _ = UserSettings.objects.get_or_create(user=request.user)
+    us.play_in_background = on
+    us.save(update_fields=["play_in_background", "last_updated"])
+
+    return JsonResponse({"ok": True, "play_in_background": on})
+
+#
 
 
 def user_from_apikey(key: str):
@@ -372,10 +398,13 @@ def settings_by_key(request):
     data = {
         "volume": settings_obj.volume,
         "play_loop": settings_obj.play_loop,
+        "play_in_background": settings_obj.play_in_background,  # <-- add this
         "default_ringtone_url": ringtone_url,
         "default_ringtone_name": settings_obj.default_ringtone.name if settings_obj.default_ringtone else None,
     }
     return JsonResponse({"ok": True, "settings": data})
+
+#
 
 
 @csrf_exempt
