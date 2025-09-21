@@ -1,4 +1,6 @@
+import hashlib
 import os, sys, json, time, argparse, requests, tempfile
+from playwright.sync_api import sync_playwright, Error as PWError, TimeoutError as PWTimeout
 from urllib.parse import urljoin, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # make sure playwright is installed
 
@@ -12,53 +14,88 @@ COOKIES_URL = urljoin(BASE_URL, "api/source/import_cookies_key/")
 def log(*a):
     print("[link]", *a, flush=True)
 
+PROFILE_ROOT = os.path.join(os.path.dirname(__file__), ".profiles")
+os.makedirs(PROFILE_ROOT, exist_ok=True)
 
-def get_cookies_with_playwright(login_url: str) -> dict:
+# per-user silo so different users never see each other's sessions
+USER_PROFILE_DIR = os.path.join(
+    PROFILE_ROOT, hashlib.sha256(API_KEY.encode("utf-8")).hexdigest()[:16]
+)
+
+def get_cookies_with_playwright(login_url: str, fresh: bool = False, profile_dir: str = None) -> dict:
     """
-    Opens a real Chrome/Edge/Chromium with a persistent profile to let you log in.
-    After you press ENTER in the terminal, we read cookies from storage_state().
-    If you accidentally closed the window, we relaunch the same profile just to read cookies.
+    Open a visible Chromium (Chrome → Edge → bundled) to let you log in,
+    then read cookies from storage_state().
+
+    - If fresh=True, uses a brand-new temp profile (deleted after).
+    - Else, uses a per-user persistent profile derived from WN_API_KEY so
+      the same user can reuse the session in future runs without leaking to others.
+    - You can override the profile directory with profile_dir=... (absolute path).
+
+    Returns: {cookie_name: cookie_value}
     """
+    import os, shutil, hashlib, tempfile
+    from urllib.parse import urlparse
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Error as PWError
-    import time
-    import json
 
-    profile_dir = os.path.join(os.path.dirname(__file__), ".pw_profile")
-    os.makedirs(profile_dir, exist_ok=True)
+    # ---------- choose profile directory ----------
+    if profile_dir:
+        user_profile = profile_dir
+    else:
+        api_key = os.getenv("WN_API_KEY", "anon")
+        if fresh:
+            user_profile = tempfile.mkdtemp(prefix="wn_profile_")
+        else:
+            # per-user silo so sessions don’t mix between different API keys/users
+            root = os.path.join(os.path.dirname(__file__), ".profiles")
+            os.makedirs(root, exist_ok=True)
+            user_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+            user_profile = os.path.join(root, user_hash)
+            os.makedirs(user_profile, exist_ok=True)
 
     def launch_ctx(pw, channel):
         args = [
             "--disable-blink-features=AutomationControlled",
-            "--disable-extensions",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-gpu",
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-dev-shm-usage", "--disable-gpu",
             "--disable-renderer-backgrounding",
             "--disable-features=IsolateOrigins,site-per-process",
-            "--password-store=basic",
+            "--password-store=basic", "--force-color-profile=srgb",
         ]
-        return pw.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir=user_profile,
             headless=False,
-            channel=channel,           # "chrome", "msedge", or None
+            channel=channel,                 # "chrome", "msedge", or None for bundled
             args=args,
             viewport={"width": 1280, "height": 800},
         )
+        # Mild anti-detection
+        ctx.add_init_script("""() => {
+          Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+          Object.defineProperty(navigator,'language',{get:()=> 'en-US'});
+          Object.defineProperty(navigator,'languages',{get:()=> ['en-US','en']});
+          const orig = WebGLRenderingContext.prototype.getParameter;
+          WebGLRenderingContext.prototype.getParameter = function(p) {
+            if (p === 37445) return 'Intel Inc.';             // UNMASKED_VENDOR_WEBGL
+            if (p === 37446) return 'Intel(R) UHD Graphics';  // UNMASKED_RENDERER_WEBGL
+            return orig.call(this, p);
+          };
+        }""")
+        return ctx
 
     def read_cookies_from_ctx(ctx) -> dict:
-        # storage_state returns {"cookies":[...], "origins":[...]}
         state = ctx.storage_state()
-        cookies_list = (state or {}).get("cookies", [])
         jar = {}
-        for c in cookies_list:
-            # keep simple name -> value map; server doesn’t need full cookie objects
-            jar[c.get("name")] = c.get("value")
+        for c in (state or {}).get("cookies", []):
+            # Keep it simple for server: name -> value map
+            name = c.get("name")
+            val  = c.get("value")
+            if name is not None and val is not None:
+                jar[str(name)] = str(val)
         return jar
 
     with sync_playwright() as pw:
         ctx = None
-        # Try Chrome → Edge → bundled Chromium
         for channel in ("chrome", "msedge", None):
             try:
                 ctx = launch_ctx(pw, channel)
@@ -68,7 +105,6 @@ def get_cookies_with_playwright(login_url: str) -> dict:
         if ctx is None:
             raise RuntimeError("Could not launch Chrome/Edge/Chromium")
 
-        # Open a page and guide the login
         page = ctx.new_page()
         try:
             page.set_extra_http_headers({
@@ -80,44 +116,59 @@ def get_cookies_with_playwright(login_url: str) -> dict:
         except PWError:
             pass
 
-        print("[link] Opening browser…")
+        print("[link] Browser opened. Log in, then return here.")
         try:
             page.goto(login_url, wait_until="domcontentloaded", timeout=90_000)
         except PWTimeout:
-            print("[link] Initial load timed out; you can still log in manually in that window.")
+            print("[link] Initial load timed out; you can still log in in that window.")
 
-        # If Google SSO pops a window and it’s blank, manual hint:
-        print("[link] Log in in the browser window. If a popup is blank, refresh it or open https://accounts.google.com/")
+        # If the site uses Google SSO, opening Accounts directly helps avoid the
+        # “This browser may not be secure” screen.
+        host = (urlparse(login_url).hostname or "").lower()
+        if any(x in host for x in ("google.", "youtube.", "gmail.", "mail.google.")):
+            try:
+                acc = ctx.new_page()
+                acc.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=90_000)
+            except Exception:
+                pass
+
+        print("[link] If a popup is blank, refresh it or open https://accounts.google.com/ manually.")
         print("[link] IMPORTANT: Do NOT close the browser entirely. Just finish login and come back here.")
-        input("[link] When you can see you’re logged in, press ENTER here to capture cookies… ")
+        input("[link] When you are logged in, press ENTER here to capture cookies… ")
 
-        # Try to read cookies without closing the context
+        # Read cookies (and recover if window was closed)
         try:
             jar = read_cookies_from_ctx(ctx)
         except PWError:
             jar = {}
 
-        # If the context was closed by accident, relaunch profile and read cookies
         if not jar:
+            # If user closed all windows, relaunch the same profile and read state again
             try:
                 ctx.close()
             except Exception:
                 pass
-            try:
-                ctx = launch_ctx(pw, "chrome")
-            except Exception:
+            for channel in ("chrome", "msedge", None):
                 try:
-                    ctx = launch_ctx(pw, "msedge")
+                    ctx = launch_ctx(pw, channel)
+                    break
                 except Exception:
-                    ctx = launch_ctx(pw, None)
-            # No navigation needed; just read storage_state from persisted profile
-            try:
-                jar = read_cookies_from_ctx(ctx)
-            except PWError:
-                jar = {}
+                    ctx = None
+            if ctx:
+                try:
+                    jar = read_cookies_from_ctx(ctx)
+                except PWError:
+                    jar = {}
 
         try:
             ctx.close()
+        except Exception:
+            pass
+
+    # Clean up temporary profile if fresh
+    if fresh:
+        try:
+            shutil.rmtree(user_profile, ignore_errors=True)
         except Exception:
             pass
 
@@ -194,6 +245,8 @@ def main():
     ap.add_argument("--url",  required=True, help="Inbox URL (e.g., https://www.fiverr.com/inbox)")
     ap.add_argument("--rendered", action="store_true",
                     help="Use headless browser rendering for this source (for dynamic pages).")
+    ap.add_argument("--fresh", action="store_true",
+                    help="Use a brand-new temporary Chromium profile for this run.")
 
     ap.add_argument("--login", action="store_true", help="Open browser to log in and capture cookies")
     args = ap.parse_args()
